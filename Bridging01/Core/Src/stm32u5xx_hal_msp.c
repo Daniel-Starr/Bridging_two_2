@@ -45,6 +45,9 @@ DMA_HandleTypeDef handle_GPDMA1_Channel1;
 DMA_HandleTypeDef handle_GPDMA1_Channel2;
 DMA_HandleTypeDef handle_GPDMA1_Channel3;
 DMA_HandleTypeDef handle_GPDMA1_Channel4;
+DMA_HandleTypeDef handle_GPDMA1_Channel5;   /* FIX: USART1 TX DMA(PC 端口非阻塞发送) */
+DMA_HandleTypeDef handle_GPDMA1_Channel6;   /* FIX: UART4 TX DMA */
+DMA_HandleTypeDef handle_GPDMA1_Channel7;   /* FIX: LPUART1 TX DMA */
 
 /* USER CODE END PV */
 
@@ -139,6 +142,11 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
                        GPDMA1_Channel0,
                        GPDMA1_REQUEST_LPUART1_RX,
                        GPDMA1_Channel0_IRQn);
+    MX_ConfigUartTxDma(huart,
+                       &handle_GPDMA1_Channel7,
+                       GPDMA1_Channel7,
+                       GPDMA1_REQUEST_LPUART1_TX,
+                       GPDMA1_Channel7_IRQn);
 
     /* USER CODE END LPUART1_MspInit 1 */
   }
@@ -181,6 +189,11 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
                        GPDMA1_Channel1,
                        GPDMA1_REQUEST_UART4_RX,
                        GPDMA1_Channel1_IRQn);
+    MX_ConfigUartTxDma(huart,
+                       &handle_GPDMA1_Channel6,
+                       GPDMA1_Channel6,
+                       GPDMA1_REQUEST_UART4_TX,
+                       GPDMA1_Channel6_IRQn);
 
     /* USER CODE END UART4_MspInit 1 */
   }
@@ -223,6 +236,11 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
                        GPDMA1_Channel2,
                        GPDMA1_REQUEST_USART1_RX,
                        GPDMA1_Channel2_IRQn);
+    MX_ConfigUartTxDma(huart,
+                       &handle_GPDMA1_Channel5,
+                       GPDMA1_Channel5,
+                       GPDMA1_REQUEST_USART1_TX,
+                       GPDMA1_Channel5_IRQn);
 
     /* USER CODE END USART1_MspInit 1 */
   }

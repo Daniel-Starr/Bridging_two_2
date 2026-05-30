@@ -65,6 +65,9 @@ extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
 extern DMA_HandleTypeDef handle_GPDMA1_Channel2;
 extern DMA_HandleTypeDef handle_GPDMA1_Channel3;
 extern DMA_HandleTypeDef handle_GPDMA1_Channel4;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel5;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel6;
+extern DMA_HandleTypeDef handle_GPDMA1_Channel7;
 
 /* USER CODE END EV */
 
@@ -286,6 +289,21 @@ void GPDMA1_Channel3_IRQHandler(void)
 void GPDMA1_Channel4_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&handle_GPDMA1_Channel4);
+}
+
+void GPDMA1_Channel5_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel5);
+}
+
+void GPDMA1_Channel6_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel6);
+}
+
+void GPDMA1_Channel7_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&handle_GPDMA1_Channel7);
 }
 
 /* USER CODE END 1 */

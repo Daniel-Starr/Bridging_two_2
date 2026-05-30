@@ -76,6 +76,26 @@ typedef struct
   uint8_t payload[FRAME_MAX_PAYLOAD];
 } BridgeTxItem;
 
+/* FIX: PC 端口非阻塞 DMA 发送所需的每端口结构(替代原来的阻塞轮询) */
+#define PC_TX_QUEUE_DEPTH              8U
+
+typedef struct
+{
+  uint8_t len;
+  uint8_t data[FRAME_MAX_PAYLOAD];
+} PcTxItem;
+
+typedef struct
+{
+  UART_HandleTypeDef *huart;
+  PcTxItem queue[PC_TX_QUEUE_DEPTH];
+  uint8_t dma_buf[FRAME_MAX_PAYLOAD];
+  volatile uint8_t head;
+  volatile uint8_t tail;
+  volatile uint8_t busy;
+  volatile uint32_t overflow_count;
+} PcTxPort;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -126,6 +146,13 @@ static uint8_t usart3_tx_dma_buf[USART3_TX_FRAME_SIZE];
 static volatile uint8_t usart3_tx_dma_busy = 0U;
 static uint32_t usart3_frame_parser_tick = 0U;
 
+/* FIX: 三个 PC 端口的非阻塞 DMA 发送端口(index 0/1/2 对应 port_id 1/2/3) */
+static PcTxPort pc_tx_ports[3] = {
+  { .huart = &huart1 },
+  { .huart = &huart4 },
+  { .huart = &hlpuart1 }
+};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -145,8 +172,10 @@ static UartRxDmaContext *App_GetRxDmaContext(UART_HandleTypeDef *huart);
 static void App_TrySendNextBridgeFrame(void);
 static void App_ProcessUsart3RxQueue(void);
 static void App_HandleUsart3Frame(uint8_t port_id, const uint8_t *payload, uint8_t len);
-static void App_SendUartData(USART_TypeDef *uart, const uint8_t *payload, uint8_t len);
 static void App_SendUartString(USART_TypeDef *uart, const char *text);
+static PcTxPort *App_GetPcTxPort(uint8_t port_id);
+static void App_QueuePcTx(PcTxPort *port, const uint8_t *payload, uint8_t len);
+static void App_TrySendNextPcFrame(PcTxPort *port);
 static uint8_t App_BuildBridgeFrame(uint8_t *buf, uint8_t port_id, const uint8_t *payload, uint8_t len);
 static uint8_t App_QueueBridgeTx(uint8_t port_id, const uint8_t *payload, uint16_t len);
 static uint8_t App_DequeueBridgeTx(BridgeTxItem *item);
@@ -154,7 +183,6 @@ static void App_QueueUsart3RxBytes(const uint8_t *payload, uint16_t len);
 static uint8_t App_DequeueUsart3RxByte(uint8_t *data);
 static void App_RestoreIrqState(uint32_t primask);
 static uint8_t FrameParser_Input(FrameParser *parser, uint8_t data);
-static USART_TypeDef *App_GetPcUart(uint8_t port_id);
 
 /* USER CODE END PFP */
 
@@ -232,17 +260,26 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE4) != HAL_OK)
+  if (HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1) != HAL_OK)   /* FIX: VOS1 支持 160MHz */
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
+  /** Configure PLL: HSI(16MHz) / PLLM(1) x PLLN(10) / PLLR(1) = 160MHz
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLMBOOST = RCC_PLLMBOOST_DIV1;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 10;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 1;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLLVCIRANGE_1;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -253,13 +290,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
                               |RCC_CLOCKTYPE_PCLK3;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;   /* FIX: 系统时钟切到 PLL(160MHz) */
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)   /* FIX: 160MHz @ VOS1 需要 4 个 Flash 等待周期 */
   {
     Error_Handler();
   }
@@ -508,6 +545,11 @@ static void App_ProcessBridge(void)
   }
 
   App_TrySendNextBridgeFrame();
+
+  /* FIX: 非阻塞驱动三个 PC 端口的 DMA 发送(替代原来的阻塞 App_SendUartData) */
+  App_TrySendNextPcFrame(&pc_tx_ports[0]);
+  App_TrySendNextPcFrame(&pc_tx_ports[1]);
+  App_TrySendNextPcFrame(&pc_tx_ports[2]);
 }
 
 static void App_StartAllRxDma(void)
@@ -622,26 +664,69 @@ static void App_ProcessUsart3RxQueue(void)
 
 static void App_HandleUsart3Frame(uint8_t port_id, const uint8_t *payload, uint8_t len)
 {
-  USART_TypeDef *pc_uart = App_GetPcUart(port_id);
+  PcTxPort *port = App_GetPcTxPort(port_id);
 
-  if ((pc_uart != 0) && (len > 0U))
+  if ((port != 0) && (len > 0U))
   {
-    App_SendUartData(pc_uart, payload, len);
+    App_QueuePcTx(port, payload, len);   /* FIX: 入队非阻塞发送,不再逐字节阻塞主循环 */
   }
 }
 
-static void App_SendUartData(USART_TypeDef *uart, const uint8_t *payload, uint8_t len)
+static PcTxPort *App_GetPcTxPort(uint8_t port_id)
 {
-  uint8_t i;
-
-  for (i = 0U; i < len; i++)
+  if ((port_id >= PORT_ID_USART1) && (port_id <= PORT_ID_LPUART1))
   {
-    while ((uart->ISR & USART_ISR_TXE_TXFNF) == 0U)
-    {
-    }
-
-    uart->TDR = payload[i];
+    return &pc_tx_ports[port_id - 1U];   /* port_id 1/2/3 -> index 0/1/2 */
   }
+  return 0;
+}
+
+static void App_QueuePcTx(PcTxPort *port, const uint8_t *payload, uint8_t len)
+{
+  uint8_t next_head = (uint8_t)((port->head + 1U) % PC_TX_QUEUE_DEPTH);
+
+  if (next_head == port->tail)
+  {
+    port->overflow_count++;            /* 队列满,记录丢帧 */
+    return;
+  }
+
+  if (len > FRAME_MAX_PAYLOAD)
+  {
+    len = FRAME_MAX_PAYLOAD;
+  }
+
+  memcpy(port->queue[port->head].data, payload, len);
+  port->queue[port->head].len = len;
+  __DMB();
+  port->head = next_head;
+}
+
+static void App_TrySendNextPcFrame(PcTxPort *port)
+{
+  PcTxItem *item;
+
+  if (port->busy != 0U)
+  {
+    return;
+  }
+
+  if (port->tail == port->head)
+  {
+    return;
+  }
+
+  item = &port->queue[port->tail];
+  memcpy(port->dma_buf, item->data, item->len);
+
+  port->busy = 1U;
+  if (HAL_UART_Transmit_DMA(port->huart, port->dma_buf, item->len) != HAL_OK)
+  {
+    port->busy = 0U;                   /* 启动失败,保留队列项,下次重试 */
+    return;
+  }
+
+  port->tail = (uint8_t)((port->tail + 1U) % PC_TX_QUEUE_DEPTH);
 }
 
 static void App_SendUartString(USART_TypeDef *uart, const char *text)
@@ -858,29 +943,26 @@ static uint8_t FrameParser_Input(FrameParser *parser, uint8_t data)
   return 0U;
 }
 
-static USART_TypeDef *App_GetPcUart(uint8_t port_id)
-{
-  switch (port_id)
-  {
-    case PORT_ID_USART1:
-      return USART1;
-
-    case PORT_ID_UART4:
-      return UART4;
-
-    case PORT_ID_LPUART1:
-      return LPUART1;
-
-    default:
-      return 0;
-  }
-}
+/* App_GetPcUart 已移除:PC 路由现在通过 App_GetPcTxPort + DMA 非阻塞发送实现 */
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+  uint8_t i;
+
   if (huart->Instance == USART3)
   {
     usart3_tx_dma_busy = 0U;
+    return;
+  }
+
+  /* FIX: PC 端口 DMA 发送完成,清除对应 busy 标志 */
+  for (i = 0U; i < 3U; i++)
+  {
+    if (pc_tx_ports[i].huart == huart)
+    {
+      pc_tx_ports[i].busy = 0U;
+      break;
+    }
   }
 }
 
