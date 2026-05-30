@@ -33,6 +33,7 @@
 #define BRIDGE_TX_QUEUE_DEPTH          32U
 #define USART3_RX_QUEUE_SIZE           2048U
 #define USART3_TX_FRAME_SIZE           (2U + 1U + 1U + FRAME_MAX_PAYLOAD + 1U)
+#define FRAME_PARSE_TIMEOUT_MS         100U
 
 #define PORT_ID_USART1                 1U
 #define PORT_ID_UART4                  2U
@@ -65,6 +66,7 @@ typedef struct
   uint16_t rx_buf_size;
   uint8_t port_id;
   uint8_t pc_port;
+  volatile uint8_t restart_pending;   /* FIX: 每端口独立的 RX DMA 重启 pending 标志 */
 } UartRxDmaContext;
 
 typedef struct
@@ -122,7 +124,7 @@ static volatile uint32_t usart3_rx_overflow_count = 0U;
 static volatile uint32_t uart_dma_restart_error_count = 0U;
 static uint8_t usart3_tx_dma_buf[USART3_TX_FRAME_SIZE];
 static volatile uint8_t usart3_tx_dma_busy = 0U;
-static volatile uint8_t usart3_rx_restart_pending = 0U;
+static uint32_t usart3_frame_parser_tick = 0U;
 
 /* USER CODE END PV */
 
@@ -137,6 +139,7 @@ static void MX_USART3_UART_Init(void);
 static void App_InitBridge(void);
 static void App_ProcessBridge(void);
 static void App_StartAllRxDma(void);
+static void App_RetryPendingRxDma(void);
 static HAL_StatusTypeDef App_StartRxDma(UartRxDmaContext *ctx);
 static UartRxDmaContext *App_GetRxDmaContext(UART_HandleTypeDef *huart);
 static void App_TrySendNextBridgeFrame(void);
@@ -195,6 +198,14 @@ int main(void)
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   App_InitBridge();
+
+  /* FIX: 启动独立看门狗(IWDG),~2s 超时,死机/卡死自动复位
+     直接操作寄存器,不依赖 HAL_IWDG 模块是否在 hal_conf.h 中使能 */
+  IWDG->KR  = 0x5555U;                 /* 解锁 PR/RLR */
+  IWDG->PR  = 3U;                      /* 预分频 /32:LSI ~32kHz -> ~1ms/tick */
+  IWDG->RLR = 1999U;                   /* 重载值 -> ~2s 超时 */
+  IWDG->KR  = 0xAAAAU;                 /* 刷新 */
+  IWDG->KR  = 0xCCCCU;                 /* 启动(硬件自动开启 LSI) */
 
   /* USER CODE END 2 */
 
@@ -436,7 +447,7 @@ static void MX_USART3_UART_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  if (HAL_UARTEx_EnableFifoMode(&huart3) != HAL_OK)   /* FIX: 开启 USART3 FIFO,提高高速桥接链路抗中断延迟的余量 */
   {
     Error_Handler();
   }
@@ -477,14 +488,25 @@ static void App_InitBridge(void)
 
 static void App_ProcessBridge(void)
 {
-  if (usart3_rx_restart_pending != 0U)
+  IWDG->KR = 0xAAAAU;                  /* FIX: 喂看门狗(主循环活着就持续刷新) */
+
+  App_RetryPendingRxDma();            /* FIX: 重试所有重启失败的 RX DMA(含三个 PC 端口,原来只重试 USART3) */
+
+  App_ProcessUsart3RxQueue();
+
+  /* FIX: 帧解析超时保护——半截帧后断流时强制复位状态机,避免吃掉下一帧的帧头 */
+  if (usart3_frame_parser.state != FRAME_WAIT_SOF0)
   {
-    if (App_StartRxDma(&usart3_rx_ctx) == HAL_OK)
+    if ((HAL_GetTick() - usart3_frame_parser_tick) > FRAME_PARSE_TIMEOUT_MS)
     {
-      usart3_rx_restart_pending = 0U;
+      usart3_frame_parser.state = FRAME_WAIT_SOF0;
     }
   }
-  App_ProcessUsart3RxQueue();
+  else
+  {
+    usart3_frame_parser_tick = HAL_GetTick();
+  }
+
   App_TrySendNextBridgeFrame();
 }
 
@@ -497,6 +519,22 @@ static void App_StartAllRxDma(void)
     if (App_StartRxDma(rx_dma_contexts[i]) != HAL_OK)
     {
       Error_Handler();
+    }
+  }
+}
+
+static void App_RetryPendingRxDma(void)
+{
+  uint8_t i;
+
+  for (i = 0U; i < (uint8_t)(sizeof(rx_dma_contexts) / sizeof(rx_dma_contexts[0])); i++)
+  {
+    if (rx_dma_contexts[i]->restart_pending != 0U)
+    {
+      if (App_StartRxDma(rx_dma_contexts[i]) == HAL_OK)
+      {
+        rx_dma_contexts[i]->restart_pending = 0U;
+      }
     }
   }
 }
@@ -669,6 +707,7 @@ static uint8_t App_QueueBridgeTx(uint8_t port_id, const uint8_t *payload, uint16
     bridge_tx_queue[bridge_tx_head].port_id = port_id;
     bridge_tx_queue[bridge_tx_head].len = (uint8_t)chunk;
     memcpy(bridge_tx_queue[bridge_tx_head].payload, &payload[offset], chunk);
+    __DMB();                          /* FIX: 内存屏障,确保帧内容写入先于 head 更新对消费者可见 */
     bridge_tx_head = next_head;
     offset = (uint16_t)(offset + chunk);
   }
@@ -715,6 +754,7 @@ static void App_QueueUsart3RxBytes(const uint8_t *payload, uint16_t len)
     }
 
     usart3_rx_queue[usart3_rx_head] = payload[i];
+    __DMB();                          /* FIX: 内存屏障,确保数据写入先于 head 更新对消费者可见 */
     usart3_rx_head = next_head;
   }
 }
@@ -877,10 +917,7 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
   if (App_StartRxDma(ctx) != HAL_OK)
   {
-    if (ctx->huart->Instance == USART3)
-    {
-      usart3_rx_restart_pending = 1U;
-    }
+    ctx->restart_pending = 1U;        /* FIX: 所有端口都支持 pending 重试(原来只有 USART3) */
     uart_dma_restart_error_count++;
   }
 }
@@ -901,10 +938,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 
   if (App_StartRxDma(ctx) != HAL_OK)
   {
-    if (ctx->huart->Instance == USART3)
-    {
-      usart3_rx_restart_pending = 1U;
-    }
+    ctx->restart_pending = 1U;        /* FIX: 所有端口都支持 pending 重试(原来只有 USART3) */
     uart_dma_restart_error_count++;
   }
 }

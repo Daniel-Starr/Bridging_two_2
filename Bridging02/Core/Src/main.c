@@ -33,6 +33,7 @@
 #define USART3_RX_QUEUE_SIZE           2048U
 #define USART3_TX_FRAME_SIZE           (2U + 1U + 1U + FRAME_MAX_PAYLOAD + 1U)
 #define RESPONSE_QUEUE_DEPTH           16U
+#define FRAME_PARSE_TIMEOUT_MS         100U
 
 typedef enum
 {
@@ -102,6 +103,8 @@ static volatile uint8_t usart3_rx_restart_pending = 0U;
 static ResponseItem response_queue[RESPONSE_QUEUE_DEPTH];
 static volatile uint8_t resp_head = 0U;
 static volatile uint8_t resp_tail = 0U;
+static volatile uint32_t response_queue_overflow_count = 0U;
+static uint32_t usart3_frame_parser_tick = 0U;
 
 /* USER CODE END PV */
 
@@ -166,6 +169,14 @@ int main(void)
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   App_InitEcho();
+
+  /* FIX: 启动独立看门狗(IWDG),~2s 超时,死机/卡死自动复位
+     直接操作寄存器,不依赖 HAL_IWDG 模块是否在 hal_conf.h 中使能 */
+  IWDG->KR  = 0x5555U;                 /* 解锁 PR/RLR */
+  IWDG->PR  = 3U;                      /* 预分频 /32:LSI ~32kHz -> ~1ms/tick */
+  IWDG->RLR = 1999U;                   /* 重载值 -> ~2s 超时 */
+  IWDG->KR  = 0xAAAAU;                 /* 刷新 */
+  IWDG->KR  = 0xCCCCU;                 /* 启动(硬件自动开启 LSI) */
 
   /* USER CODE END 2 */
 
@@ -407,7 +418,7 @@ static void MX_USART3_UART_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  if (HAL_UARTEx_EnableFifoMode(&huart3) != HAL_OK)   /* FIX: 开启 USART3 FIFO,提高高速桥接链路抗中断延迟的余量 */
   {
     Error_Handler();
   }
@@ -450,6 +461,8 @@ static void App_ProcessEcho(void)
 {
   uint8_t data;
 
+  IWDG->KR = 0xAAAAU;                  /* FIX: 喂看门狗(主循环活着就持续刷新) */
+
   if (usart3_rx_restart_pending != 0U)
   {
     if (App_StartRxDma(&usart3_rx_ctx) == HAL_OK)
@@ -466,6 +479,19 @@ static void App_ProcessEcho(void)
                       usart3_frame_parser.payload,
                       usart3_frame_parser.len);
     }
+  }
+
+  /* FIX: 帧解析超时保护——半截帧后断流时强制复位状态机,避免吃掉下一帧的帧头 */
+  if (usart3_frame_parser.state != FRAME_WAIT_SOF0)
+  {
+    if ((HAL_GetTick() - usart3_frame_parser_tick) > FRAME_PARSE_TIMEOUT_MS)
+    {
+      usart3_frame_parser.state = FRAME_WAIT_SOF0;
+    }
+  }
+  else
+  {
+    usart3_frame_parser_tick = HAL_GetTick();
   }
 
   App_TrySendNextResponse();
@@ -506,14 +532,17 @@ static void App_HandleFrame(uint8_t port_id, const uint8_t *payload, uint8_t len
   next_head = (uint8_t)((resp_head + 1U) % RESPONSE_QUEUE_DEPTH);
   if (next_head == resp_tail)
   {
+    response_queue_overflow_count++;   /* FIX: 记录响应队列溢出丢帧(原来是静默丢弃,无法诊断) */
     return;
   }
 
-  memcpy(response_queue[resp_head].payload, payload, len);
-  if (len < FRAME_MAX_PAYLOAD)
+  /* FIX: 预留 1 字节给 '*',即使满帧(len==128)也能追加标记,保证行为一致 */
+  if (len > (uint8_t)(FRAME_MAX_PAYLOAD - 1U))
   {
-    response_queue[resp_head].payload[len++] = '*';
+    len = (uint8_t)(FRAME_MAX_PAYLOAD - 1U);
   }
+  memcpy(response_queue[resp_head].payload, payload, len);
+  response_queue[resp_head].payload[len++] = '*';
   response_queue[resp_head].port_id = port_id;
   response_queue[resp_head].len = len;
   resp_head = next_head;
@@ -592,6 +621,7 @@ static void App_QueueUsart3RxBytes(const uint8_t *payload, uint16_t len)
     }
 
     usart3_rx_queue[usart3_rx_head] = payload[i];
+    __DMB();                          /* FIX: 内存屏障,确保数据写入先于 head 更新对消费者可见 */
     usart3_rx_head = next_head;
   }
 }

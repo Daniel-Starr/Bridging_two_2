@@ -376,7 +376,7 @@ static void MX_ConfigUartRxDma(UART_HandleTypeDef *huart,
   hdma->Init.DestInc = DMA_DINC_INCREMENTED;
   hdma->Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
   hdma->Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
-  hdma->Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+  hdma->Init.Priority = DMA_HIGH_PRIORITY;   /* FIX: 提高 USART3 DMA 优先级(高速桥接链路优先占用总线) */
   hdma->Init.SrcBurstLength = 1U;
   hdma->Init.DestBurstLength = 1U;
   hdma->Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
@@ -411,7 +411,7 @@ static void MX_ConfigUartTxDma(UART_HandleTypeDef *huart,
   hdma->Init.DestInc = DMA_DINC_FIXED;
   hdma->Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
   hdma->Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
-  hdma->Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+  hdma->Init.Priority = DMA_HIGH_PRIORITY;   /* FIX: 提高 USART3 DMA 优先级(高速桥接链路优先占用总线) */
   hdma->Init.SrcBurstLength = 1U;
   hdma->Init.DestBurstLength = 1U;
   hdma->Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;

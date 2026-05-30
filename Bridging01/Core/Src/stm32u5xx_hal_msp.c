@@ -409,7 +409,8 @@ static void MX_ConfigUartRxDma(UART_HandleTypeDef *huart,
   hdma->Init.DestInc = DMA_DINC_INCREMENTED;
   hdma->Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
   hdma->Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
-  hdma->Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+  /* FIX: USART3 RX 用高 DMA 优先级,三个 PC 端口保持低优先级 */
+  hdma->Init.Priority = (request == GPDMA1_REQUEST_USART3_RX) ? DMA_HIGH_PRIORITY : DMA_LOW_PRIORITY_LOW_WEIGHT;
   hdma->Init.SrcBurstLength = 1U;
   hdma->Init.DestBurstLength = 1U;
   hdma->Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
@@ -444,7 +445,8 @@ static void MX_ConfigUartTxDma(UART_HandleTypeDef *huart,
   hdma->Init.DestInc = DMA_DINC_FIXED;
   hdma->Init.SrcDataWidth = DMA_SRC_DATAWIDTH_BYTE;
   hdma->Init.DestDataWidth = DMA_DEST_DATAWIDTH_BYTE;
-  hdma->Init.Priority = DMA_LOW_PRIORITY_LOW_WEIGHT;
+  /* FIX: USART3 TX 用高 DMA 优先级,PC 端口 TX(批次2新增)保持低优先级 */
+  hdma->Init.Priority = (request == GPDMA1_REQUEST_USART3_TX) ? DMA_HIGH_PRIORITY : DMA_LOW_PRIORITY_LOW_WEIGHT;
   hdma->Init.SrcBurstLength = 1U;
   hdma->Init.DestBurstLength = 1U;
   hdma->Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT0;
